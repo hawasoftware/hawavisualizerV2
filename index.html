@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>3D Audio Visualizer — hawasoftware</title>
+<style>
+  :root{
+    --cyan:#5eead4;
+    --blue:#38bdf8;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html,body{width:100%;height:100%;overflow:hidden;background:#000308;}
+  body{
+    font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    color:#9fd8ff;
+    -webkit-font-smoothing:antialiased;
+    user-select:none;
+  }
+  #c{position:fixed;inset:0;display:block;width:100%;height:100%;}
+
+  /* ---------- intro ---------- */
+  #intro{
+    position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:16px;pointer-events:none;text-align:center;padding:20px;z-index:5;
+    transition:opacity .9s ease, transform .9s ease;
+  }
+  #intro.hide{opacity:0;transform:scale(1.07);}
+  #intro h1{
+    font-size:clamp(17px,4.1vw,38px);letter-spacing:.42em;font-weight:600;
+    color:#e6faff;padding-left:.42em;
+    text-shadow:0 0 18px rgba(56,189,248,.9),0 0 70px rgba(56,189,248,.35);
+  }
+  #intro p{
+    font-size:clamp(8px,1.5vw,11px);letter-spacing:.24em;color:#5f97b8;text-transform:uppercase;
+    max-width:640px;line-height:2;
+  }
+
+  /* ---------- status ---------- */
+  #status{
+    position:fixed;top:16px;left:18px;z-index:6;pointer-events:none;
+    font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:#4d7f9c;
+    max-width:62vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+    transition:color .4s;
+  }
+
+  /* ---------- control panel ---------- */
+  #panel{
+    position:fixed;left:50%;bottom:22px;transform:translateX(-50%);
+    display:flex;gap:8px;flex-wrap:wrap;justify-content:center;z-index:6;
+  }
+  #panel button{
+    font:inherit;font-size:10px;letter-spacing:.18em;text-transform:uppercase;
+    color:#8fd6ff;background:rgba(10,30,45,.5);
+    border:1px solid rgba(80,180,230,.28);border-radius:999px;
+    padding:8px 16px;cursor:pointer;
+    -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
+    transition:all .25s ease;
+  }
+  #panel button:hover{
+    color:#eafcff;border-color:rgba(120,220,255,.75);
+    background:rgba(20,70,100,.6);
+    box-shadow:0 0 18px rgba(80,200,255,.35);
+  }
+  #panel button:active{transform:scale(.95);}
+
+  /* ---------- tiny github button ---------- */
+  #gh{
+    position:fixed;right:12px;bottom:12px;z-index:7;
+    font-size:9px;letter-spacing:.1em;text-transform:lowercase;
+    color:#5f8fa8;text-decoration:none;
+    border:1px solid rgba(90,150,180,.25);border-radius:6px;
+    padding:3px 7px;background:rgba(8,18,28,.45);
+    -webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);
+    opacity:.55;transition:all .25s ease;
+  }
+  #gh:hover{
+    opacity:1;color:#bfe9ff;border-color:rgba(120,220,255,.6);
+    box-shadow:0 0 12px rgba(80,200,255,.3);
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="intro">
+  <h1>3D AUDIO VISUALIZER</h1>
+  <p>real-time spectral · waveform · particle engine<br>choose an audio source below to begin</p>
+</div>
+
+<div id="status">IDLE — SELECT A SOURCE</div>
+
+<div id="panel">
+  <button data-src="mic">🎙 Microphone</button>
+  <button data-src="system">🖥 System / Tab Audio</button>
+  <button data-src="file">🎵 Audio File</button>
+</div>
+
+<input id="fileInput" type="file" accept="audio/*" hidden />
+
+<a id="gh" href="https://github.com/hawasoftware" target="_blank" rel="noopener noreferrer">hawasoftware</a>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+/* ============================================================
+   RENDERER / SCENE / CAMERA
+   ============================================================ */
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.25;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000206);
+scene.fog = new THREE.FogExp2(0x000206, 0.016);
+
+const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 400);
+camera.position.set(0, 4.6, 13.5);
+camera.lookAt(0, 0, 0);
+
+/* ============================================================
+   POST PROCESSING (BLOOM)
+   ============================================================ */
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+
+const bloom = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  0.85,   // strength
+  0.5,    // radius
+  0.1     // threshold
+);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+
+/* ============================================================
+   CORE (inner geometry)
+   ============================================================ */
+const coreGroup = new THREE.Group();
+scene.add(coreGroup);
+
+const coreA = new THREE.Mesh(
+  new THREE.IcosahedronGeometry(1.35, 1),
+  new THREE.MeshBasicMaterial({ color: 0x2ee6ff, wireframe: true, transparent: true, opacity: 0.9, toneMapped: false })
+);
+coreGroup.add(coreA);
+
+const coreB = new THREE.Mesh(
+  new THREE.OctahedronGeometry(2.15, 0),
+  new THREE.MeshBasicMaterial({ color: 0x8b5cf6, wireframe: true, transparent: true, opacity: 0.5, toneMapped: false })
+);
+coreGroup.add(coreB);
+
+const coreGlow = new THREE.Mesh(
+  new THREE.SphereGeometry(1.15, 32, 32),
+  new THREE.MeshBasicMaterial({
+    color: 0x0b4d6b, transparent: true, opacity: 0.4,
+    blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false
+  })
+);
+coreGroup.add(coreGlow);
+
+/* ============================================================
+   SPECTRUM BARS (instanced, mirrored ring)
+   ============================================================ */
+const NUM_BARS = 192;
+const RADIUS   = 4.6;
+const GAP      = 0.55;
+
+function makeBarGeometry(dir) {
+  const g = new THREE.BoxGeometry(0.085, 1, 0.085);
+  g.translate(0, dir * 0.5, 0);   // pivot at base
+  return g;
+}
+
+const barMat = new THREE.MeshBasicMaterial({ toneMapped: false });
+
+const barsUp   = new THREE.InstancedMesh(makeBarGeometry( 1), barMat, NUM_BARS);
+const barsDown = new THREE.InstancedMesh(makeBarGeometry(-1), barMat, NUM_BARS);
+barsUp.frustumCulled = false;
+barsDown.frustumCulled = false;
+barsUp.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+barsDown.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+const barGroup = new THREE.Group();
+barGroup.add(barsUp, barsDown);
+scene.add(barGroup);
+
+/* ============================================================
+   WAVEFORM RING
+   ============================================================ */
+const WAVE_N = 600;
+const waveArr = new Float32Array(WAVE_N * 3);
+const waveGeo = new THREE.BufferGeometry();
+waveGeo.setAttribute('position', new THREE.BufferAttribute(waveArr, 3));
+const waveLine = new THREE.LineLoop(
+  waveGeo,
+  new THREE.LineBasicMaterial({
+    color: 0x67e8f9, transparent: true, opacity: 0.9,
+    blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false
+  })
+);
+waveLine.frustumCulled = false;
+scene.add(waveLine);
+
+/* ============================================================
+   PARTICLE FIELD
+   ============================================================ */
+const P_COUNT = 2600;
+const pPos = new Float32Array(P_COUNT * 3);
+for (let i = 0; i < P_COUNT; i++) {
+  const r  = 9 + Math.pow(Math.random(), 0.6) * 38;
+  const th = Math.random() * Math.PI * 2;
+  const ph = Math.acos(2 * Math.random() - 1);
+  pPos[i * 3]     = r * Math.sin(ph) * Math.cos(th);
+  pPos[i * 3 + 1] = r * Math.cos(ph) * 0.62;
+  pPos[i * 3 + 2] = r * Math.sin(ph) * Math.sin(th);
+}
+const pGeo = new THREE.BufferGeometry();
+pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+const particles = new THREE.Points(pGeo, new THREE.PointsMaterial({
+  color: 0x4dd0ff, size: 0.09, transparent: true, opacity: 0.62,
+  blending: THREE.AdditiveBlending, depthWrite: false,
+  sizeAttenuation: true, toneMapped: false
+}));
+particles.frustumCulled = false;
+scene.add(particles);
+
+/* ============================================================
+   FLOOR GRID
+   ============================================================ */
+const grid = new THREE.GridHelper(140, 70, 0x0b3b52, 0x061c28);
+grid.position.y = -6.2;
+grid.material.transparent = true;
+grid.material.opacity = 0.5;
+scene.add(grid);
+
+/* ============================================================
+   AUDIO ENGINE
+   ============================================================ */
+let audioCtx   = null;
+let analyser   = null;
+let freqData   = new Uint8Array(4096);
+let timeData   = new Uint8Array(8192).fill(128);
+let barRanges  = null;
+
+let streamRef  = null;   // MediaStream (mic / system)
+let srcNodeRef = null;   // MediaStreamAudioSourceNode
+let fileSrcRef = null;   // AudioBufferSourceNode
+
+const statusEl = document.getElementById('status');
+const introEl  = document.getElementById('intro');
+
+function setStatus(txt, hot) {
+  statusEl.textContent = txt;
+  statusEl.style.color = hot ? '#7fe3ff' : '#4d7f9c';
+}
+function hideIntro() { introEl.classList.add('hide'); }
+
+async function initAudio() {
+  if (audioCtx) {
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+    return;
+  }
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 8192;
+  analyser.smoothingTimeConstant = 0.65;
+  analyser.minDecibels = -100;
+  analyser.maxDecibels = -12;
+
+  freqData = new Uint8Array(analyser.frequencyBinCount);
+  timeData = new Uint8Array(analyser.fftSize);
+
+  buildBarRanges();
+  await audioCtx.resume();
+}
+
+/* log-spaced frequency bands -> FFT bin ranges */
+function buildBarRanges() {
+  const nyquist = audioCtx.sampleRate / 2;
+  const bins    = analyser.frequencyBinCount;
+  const fMin = 24, fMax = 16500;
+  barRanges = new Array(NUM_BARS);
+
+  for (let i = 0; i < NUM_BARS; i++) {
+    const f0 = fMin * Math.pow(fMax / fMin, i / NUM_BARS);
+    const f1 = fMin * Math.pow(fMax / fMin, (i + 1) / NUM_BARS);
+    let b0 = Math.round((f0 / nyquist) * bins);
+    let b1 = Math.round((f1 / nyquist) * bins);
+    b0 = Math.max(0, Math.min(bins - 1, b0));
+    b1 = Math.max(b0 + 1, Math.min(bins, b1));
+    barRanges[i] = [b0, b1];
+  }
+}
+
+function stopAll() {
+  if (fileSrcRef) { try { fileSrcRef.stop(); } catch (e) {} fileSrcRef = null; }
+  if (srcNodeRef) { try { srcNodeRef.disconnect(); } catch (e) {} srcNodeRef = null; }
+  if (streamRef)  { streamRef.getTracks().forEach(t => t.stop()); streamRef = null; }
+}
+
+/* ---------- Microphone ---------- */
+async function startMic() {
+  await initAudio();
+  stopAll();
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+    });
+    streamRef  = s;
+    srcNodeRef = audioCtx.createMediaStreamSource(s);
+    srcNodeRef.connect(analyser);
+    setStatus('● LIVE — MICROPHONE', true);
+    hideIntro();
+  } catch (e) {
+    setStatus('MIC ACCESS DENIED');
+  }
+}
+
+/* ---------- System / Tab audio ---------- */
+async function startSystem() {
+  await initAudio();
+  stopAll();
+  try {
+    const s = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    if (!s.getAudioTracks().length) {
+      s.getTracks().forEach(t => t.stop());
+      setStatus('NO AUDIO TRACK — SHARE A TAB WITH "SHARE TAB AUDIO"');
+      return;
+    }
+    streamRef  = s;
+    srcNodeRef = audioCtx.createMediaStreamSource(s);
+    srcNodeRef.connect(analyser);
+    setStatus('● LIVE — SYSTEM / TAB AUDIO', true);
+    hideIntro();
+  } catch (e) {
+    setStatus('CAPTURE CANCELLED');
+  }
+}
+
+/* ---------- Local file ---------- */
+async function startFile(file) {
+  await initAudio();
+  stopAll();
+  try {
+    const buf = await file.arrayBuffer();
+    const decoded = await audioCtx.decodeAudioData(buf);
+    const src = audioCtx.createBufferSource();
+    src.buffer = decoded;
+    src.loop = true;
+    src.connect(analyser);
+    src.connect(audioCtx.destination);
+    src.start();
+    fileSrcRef = src;
+    setStatus('● PLAYING — ' + file.name.toUpperCase().slice(0, 30), true);
+    hideIntro();
+  } catch (e) {
+    setStatus('COULD NOT DECODE FILE');
+  }
+}
+
+/* ============================================================
+   UI WIRING
+   ============================================================ */
+const fileInput = document.getElementById('fileInput');
+
+document.querySelectorAll('[data-src]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const s = btn.dataset.src;
+    if (s === 'mic')         startMic();
+    else if (s === 'system') startSystem();
+    else if (s === 'file')   fileInput.click();
+  });
+});
+
+fileInput.addEventListener('change', e => {
+  if (e.target.files && e.target.files[0]) startFile(e.target.files[0]);
+  fileInput.value = '';
+});
+
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('drop', e => {
+  e.preventDefault();
+  const f = e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f && f.type.startsWith('audio')) startFile(f);
+});
+
+window.addEventListener('dblclick', () => {
+  if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+  else document.exitFullscreen?.();
+});
+
+/* mouse parallax */
+let mouseX = 0, mouseY = 0;
+window.addEventListener('pointermove', e => {
+  mouseX = (e.clientX / window.innerWidth)  * 2 - 1;
+  mouseY = (e.clientY / window.innerHeight) * 2 - 1;
+});
+
+/* ============================================================
+   ANALYSIS STATE
+   ============================================================ */
+const smooth   = new Float32Array(NUM_BARS);
+const dummy    = new THREE.Object3D();
+const tmpColor = new THREE.Color();
+
+let bassNow = 0, bassAvg = 0, beatPulse = 0, lastBeat = 0, level = 0;
+
+function analyse() {
+  if (!analyser) {
+    for (let i = 0; i < NUM_BARS; i++) smooth[i] *= 0.94;
+    bassNow *= 0.94;
+    return;
+  }
+
+  analyser.getByteFrequencyData(freqData);
+  analyser.getByteTimeDomainData(timeData);
+
+  let sum = 0;
+
+  for (let i = 0; i < NUM_BARS; i++) {
+    const r = barRanges[i];
+    let acc = 0;
+    for (let b = r[0]; b < r[1]; b++) acc += freqData[b];
+
+    let v = acc / (r[1] - r[0]) / 255;
+    v = Math.pow(v, 1.05);
+
+    // spectral tilt compensation — high freqs carry less energy
+    v *= 0.55 + 1.7 * Math.pow(i / NUM_BARS, 0.85);
+    if (v > 1) v = 1;
+
+    // fast attack / slow release
+    const k = v > smooth[i] ? 0.50 : 0.13;
+    smooth[i] += (v - smooth[i]) * k;
+
+    sum += v;
+  }
+
+  // bass energy
+  let b = 0;
+  for (let i = 0; i < 10; i++) b += smooth[i];
+  bassNow = b / 10;
+
+  bassAvg += (bassNow - bassAvg) * 0.05;
+
+  const now = performance.now() / 1000;
+  if (bassNow > bassAvg * 1.25 && bassNow > 0.15 && now - lastBeat > 0.16) {
+    lastBeat = now;
+    beatPulse = Math.min(1.3, beatPulse + 0.85);
+  }
+
+  level += (sum / NUM_BARS - level) * 0.1;
+}
+
+/* ============================================================
+   MAIN LOOP
+   ============================================================ */
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const t  = clock.elapsedTime;
+
+  analyse();
+
+  // beat envelope decay
+  beatPulse *= Math.pow(0.0015, dt);
+  if (beatPulse < 0.0005) beatPulse = 0;
+  const pulse = beatPulse;
+
+  /* ---------- spectrum bars ---------- */
+  barGroup.rotation.y = t * 0.08;
+
+  for (let i = 0; i < NUM_BARS; i++) {
+    const a  = (i / NUM_BARS) * Math.PI * 2;
+    const ca = Math.cos(a), sa = Math.sin(a);
+    const v  = smooth[i];
+
+    const h = 0.18 + v * 4.6;
+
+    const hue = (0.5 + 0.42 * (i / NUM_BARS) + t * 0.02) % 1;
+    tmpColor.setHSL(hue, 0.85, 0.10 + v * 0.52 + pulse * 0.08);
+
+    dummy.rotation.set(0, -a, 0);
+
+    // upward bar
+    dummy.position.set(ca * RADIUS, GAP, sa * RADIUS);
+    dummy.scale.set(1, h, 1);
+    dummy.updateMatrix();
+    barsUp.setMatrixAt(i, dummy.matrix);
+    barsUp.setColorAt(i, tmpColor);
+
+    // mirrored downward bar
+    dummy.position.set(ca * RADIUS, -GAP, sa * RADIUS);
+    dummy.scale.set(1, h * 0.68, 1);
+    dummy.updateMatrix();
+    barsDown.setMatrixAt(i, dummy.matrix);
+    barsDown.setColorAt(i, tmpColor);
+  }
+
+  barsUp.instanceMatrix.needsUpdate = true;
+  barsDown.instanceMatrix.needsUpdate = true;
+  if (barsUp.instanceColor)   barsUp.instanceColor.needsUpdate = true;
+  if (barsDown.instanceColor) barsDown.instanceColor.needsUpdate = true;
+
+  /* ---------- core ---------- */
+  coreA.rotation.x += dt * 0.40;
+  coreA.rotation.y += dt * 0.60;
+  coreB.rotation.x -= dt * 0.26;
+  coreB.rotation.y -= dt * 0.36;
+  coreGroup.rotation.y = t * 0.10;
+  coreGroup.scale.setScalar(1 + bassNow * 1.5 + pulse * 0.5);
+
+  /* ---------- waveform ring ---------- */
+  const td   = timeData;
+  const step = Math.max(1, Math.floor(td.length / WAVE_N));
+
+  for (let i = 0; i < WAVE_N; i++) {
+    const a = (i / WAVE_N) * Math.PI * 2;
+    const s = (td[i * step] - 128) / 128;
+    const r = 6.7 + s * 2.2 + bassNow * 1.2;
+
+    waveArr[i * 3]     = Math.cos(a) * r;
+    waveArr[i * 3 + 1] = s * 2.4;
+    waveArr[i * 3 + 2] = Math.sin(a) * r;
+  }
+  waveGeo.attributes.position.needsUpdate = true;
+  waveGeo.computeBoundingSphere();
+  waveLine.rotation.y = -t * 0.12;
+
+  /* ---------- particles ---------- */
+  particles.rotation.y += dt * 0.02;
+  particles.rotation.x = Math.sin(t * 0.07) * 0.15;
+  particles.scale.setScalar(1 + bassNow * 0.12 + pulse * 0.05);
+
+  /* ---------- camera ---------- */
+  const targetX = Math.sin(t * 0.13) * 2.5 + mouseX * 3.0;
+  const targetY = 4.6 + Math.sin(t * 0.19) * 1.1 - mouseY * 1.5;
+  const targetZ = 13.5 + Math.cos(t * 0.11) * 1.8;
+
+  camera.position.x += (targetX - camera.position.x) * 0.035;
+  camera.position.y += (targetY - camera.position.y) * 0.035;
+  camera.position.z += (targetZ - camera.position.z) * 0.035;
+  camera.lookAt(0, 0, 0);
+
+  /* ---------- bloom ---------- */
+  bloom.strength = 0.55 + bassNow * 0.75 + pulse * 0.9;
+  bloom.radius   = 0.42 + level * 0.5;
+
+  composer.render();
+}
+
+/* ============================================================
+   RESIZE
+   ============================================================ */
+window.addEventListener('resize', () => {
+  const w = window.innerWidth, h = window.innerHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(w, h);
+  composer.setSize(w, h);
+  bloom.setSize(w, h);
+});
+
+/* ============================================================
+   GO
+   ============================================================ */
+animate();
+</script>
+</body>
+</html>
